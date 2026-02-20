@@ -2,7 +2,6 @@
   "name": "wxt-local-analytics",
   "type": "module",
   "version": "0.0.2",
-  "private": true,
   "description": "A simple example library built by tsdown",
   "exports": {
     ".": "./dist/index.mjs",
