@@ -28,7 +28,23 @@ pnpm add wxt-local-analytics @wxt-dev/analytics
 
 > `@wxt-dev/analytics` is a peer dependency.
 
-## Usage
+## Usage with wxt
+
+```ts
+// <srcDir>/app.config.ts
+import local from "wxt-local-analytics";
+
+export default defineAppConfig({
+  analytics: {
+    debug: true,
+    providers: [local()],
+  },
+});
+```
+
+Follow the docs from [wxt](https://wxt.dev/analytics.html)
+
+## Usage without wxt
 
 ```ts
 import { createAnalytics } from "@wxt-dev/analytics";
@@ -36,10 +52,6 @@ import localAnalyticsProvider from "wxt-local-analytics";
 
 const analytics = createAnalytics({
   provider: localAnalyticsProvider,
-  providerConfig: {
-    dbName: "my-extension-analytics",
-    dbVersion: 1,
-  },
 });
 
 await analytics.page({
@@ -65,3 +77,7 @@ pnpm dev
 
 - `identify` is currently a no-op in this provider.
 - This package is intended for browser contexts where IndexedDB is available.
+
+## Special Thanks
+
+to [@aklinker1](https://github.com/aklinker1) for creating the [wxt](https://wxt.dev/) framework!
