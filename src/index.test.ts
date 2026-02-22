@@ -1,61 +1,108 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type Mock,
+} from "vitest";
 
-type OpenDbArgs = {
-  dbName: string;
-  dbVersion: number;
-  options: {
-    upgrade: (db: {
-      objectStoreNames: { contains: (name: string) => boolean };
-      createObjectStore: (
-        name: string,
-        options: { keyPath: string; autoIncrement: boolean },
-      ) => void;
-    }) => void;
+interface MockIDBRequest {
+  result: unknown;
+  error: DOMException | null;
+  onsuccess: (() => void) | null;
+  onerror: (() => void) | null;
+  onupgradeneeded: ((event: { target: { result: unknown } }) => void) | null;
+}
+
+interface MockIDBObjectStore {
+  add: Mock;
+}
+
+interface MockIDBTransaction {
+  objectStore: Mock;
+}
+
+interface MockIDBDatabase {
+  objectStoreNames: {
+    contains: Mock;
   };
-};
+  createObjectStore: Mock;
+  transaction: Mock;
+}
 
-async function setupModule() {
-  const addMock = vi.fn();
-  const createObjectStoreMock = vi.fn();
-  const containsMock = vi.fn().mockReturnValue(false);
-
-  const openDbCalls: OpenDbArgs[] = [];
-
-  vi.doMock("idb", () => ({
-    openDB: vi.fn(
-      (dbName: string, dbVersion: number, options: OpenDbArgs["options"]) => {
-        openDbCalls.push({ dbName, dbVersion, options });
-
-        options.upgrade({
-          objectStoreNames: { contains: containsMock },
-          createObjectStore: createObjectStoreMock,
-        });
-
-        return Promise.resolve({ add: addMock });
-      },
-    ),
-  }));
-
-  const module = await import("./index");
-
-  return {
-    providerFactory: module.default,
-    addMock,
-    createObjectStoreMock,
-    containsMock,
-    openDbCalls,
+function createIDBRequestMock(result: unknown): MockIDBRequest {
+  const request: MockIDBRequest = {
+    result,
+    error: null,
+    onsuccess: null,
+    onerror: null,
+    onupgradeneeded: null,
   };
+  return request;
 }
 
 describe("wxt local analytics provider", () => {
+  let indexedDBOpenMock: Mock;
+  let dbMock: MockIDBDatabase;
+  let transactionMock: MockIDBTransaction;
+  let objectStoreMock: MockIDBObjectStore;
+  let addRequestMock: MockIDBRequest;
+
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
-    vi.unmock("idb");
+
+    // Mock IDB infrastructure
+    addRequestMock = createIDBRequestMock(undefined);
+
+    objectStoreMock = {
+      add: vi.fn(() => {
+        setTimeout(() => {
+          if (addRequestMock.onsuccess) addRequestMock.onsuccess();
+        }, 0);
+        return addRequestMock;
+      }),
+    };
+
+    transactionMock = {
+      objectStore: vi.fn(() => objectStoreMock),
+    };
+
+    dbMock = {
+      objectStoreNames: {
+        contains: vi.fn().mockReturnValue(false),
+      },
+      createObjectStore: vi.fn(),
+      transaction: vi.fn(() => transactionMock),
+    };
+
+    indexedDBOpenMock = vi.fn(() => {
+      const request = createIDBRequestMock(dbMock);
+      // Simulate success after a tick
+      setTimeout(() => {
+        // If upgrade needed logic is required, it's tricky to mock perfectly without more state,
+        // but for now let's assume if we need upgrade we trigger it, else success.
+        // For simplicity in these tests, we'll just trigger success,
+        // but we need to expose the ability to trigger upgrade for specific tests.
+        if (request.onsuccess) request.onsuccess();
+      }, 10);
+      return request;
+    });
+
+    vi.stubGlobal("indexedDB", {
+      open: indexedDBOpenMock,
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it("stores page events in the events store", async () => {
-    const { providerFactory, addMock } = await setupModule();
+    const module = await import("./index");
+    const providerFactory = module.default;
 
     const provider = providerFactory({ dbName: "analytics", dbVersion: 1 })(
       {} as never,
@@ -65,15 +112,20 @@ describe("wxt local analytics provider", () => {
     const pageEvent = { name: "Home", path: "/" } as never;
     await provider.page(pageEvent);
 
-    expect(addMock).toHaveBeenCalledTimes(1);
-    expect(addMock).toHaveBeenCalledWith("events", {
+    expect(indexedDBOpenMock).toHaveBeenCalledWith("analytics", 1);
+    expect(dbMock.transaction).toHaveBeenCalledWith("events", "readwrite");
+    expect(transactionMock.objectStore).toHaveBeenCalledWith("events");
+
+    expect(objectStoreMock.add).toHaveBeenCalledTimes(1);
+    expect(objectStoreMock.add).toHaveBeenCalledWith({
       type: "page",
       event: pageEvent,
     });
   });
 
   it("stores track events in the events store", async () => {
-    const { providerFactory, addMock } = await setupModule();
+    const module = await import("./index");
+    const providerFactory = module.default;
 
     const provider = providerFactory({ dbName: "analytics", dbVersion: 1 })(
       {} as never,
@@ -86,36 +138,26 @@ describe("wxt local analytics provider", () => {
     } as never;
     await provider.track(trackEvent);
 
-    expect(addMock).toHaveBeenCalledTimes(1);
-    expect(addMock).toHaveBeenCalledWith("events", {
+    expect(objectStoreMock.add).toHaveBeenCalledTimes(1);
+    expect(objectStoreMock.add).toHaveBeenCalledWith({
       type: "track",
       event: trackEvent,
     });
   });
 
   it("uses default db configuration when provider config is empty", async () => {
-    const {
-      providerFactory,
-      openDbCalls,
-      containsMock,
-      createObjectStoreMock,
-    } = await setupModule();
+    const module = await import("./index");
+    const providerFactory = module.default;
 
     const provider = providerFactory({} as never)({} as never, {} as never);
     await provider.page({ name: "Home", path: "/" } as never);
 
-    expect(openDbCalls).toHaveLength(1);
-    expect(openDbCalls[0].dbName).toBe("analytics");
-    expect(openDbCalls[0].dbVersion).toBe(1);
-    expect(containsMock).toHaveBeenCalledWith("events");
-    expect(createObjectStoreMock).toHaveBeenCalledWith("events", {
-      keyPath: "id",
-      autoIncrement: true,
-    });
+    expect(indexedDBOpenMock).toHaveBeenCalledWith("analytics", 1);
   });
 
   it("uses custom db configuration from provider options", async () => {
-    const { providerFactory, openDbCalls } = await setupModule();
+    const module = await import("./index");
+    const providerFactory = module.default;
 
     const provider = providerFactory({
       dbName: "my-extension-db",
@@ -123,13 +165,12 @@ describe("wxt local analytics provider", () => {
     })({} as never, {} as never);
     await provider.track({ name: "Custom Event" } as never);
 
-    expect(openDbCalls).toHaveLength(1);
-    expect(openDbCalls[0].dbName).toBe("my-extension-db");
-    expect(openDbCalls[0].dbVersion).toBe(3);
+    expect(indexedDBOpenMock).toHaveBeenCalledWith("my-extension-db", 3);
   });
 
   it("does not write events for identify", async () => {
-    const { providerFactory, addMock } = await setupModule();
+    const module = await import("./index");
+    const providerFactory = module.default;
 
     const provider = providerFactory({ dbName: "analytics", dbVersion: 1 })(
       {} as never,
@@ -137,6 +178,36 @@ describe("wxt local analytics provider", () => {
     );
 
     await provider.identify({} as never);
-    expect(addMock).not.toHaveBeenCalled();
+    expect(objectStoreMock.add).not.toHaveBeenCalled();
+  });
+
+  it("initializes object store if missing", async () => {
+    // Custom mock for this test to trigger upgrade
+    indexedDBOpenMock.mockImplementation(() => {
+      const request = createIDBRequestMock(dbMock);
+      setTimeout(() => {
+        if (request.onupgradeneeded)
+          request.onupgradeneeded({ target: { result: dbMock } });
+        if (request.onsuccess) request.onsuccess();
+      }, 10);
+      return request;
+    });
+
+    const module = await import("./index");
+    const providerFactory = module.default;
+
+    const provider = providerFactory({ dbName: "analytics", dbVersion: 1 })(
+      {} as never,
+      {} as never,
+    );
+
+    // Trigger a call to init DB
+    await provider.page({ name: "Home", path: "/" } as never);
+
+    expect(dbMock.objectStoreNames.contains).toHaveBeenCalledWith("events");
+    expect(dbMock.createObjectStore).toHaveBeenCalledWith("events", {
+      keyPath: "id",
+      autoIncrement: true,
+    });
   });
 });
